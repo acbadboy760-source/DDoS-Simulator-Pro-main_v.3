@@ -1,111 +1,67 @@
-name: Live Desktop 1080p (WebSocket)
+name: NoVNC Cloud Desktop
 
 on:
   workflow_dispatch:
 
 jobs:
-  master:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: نصب دسکتاپ و ابزارها
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install Desktop Environment & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-goodies xvfb xdotool curl python3-pip maim imagemagick
-          pip3 install flask flask-socketio eventlet
+          # نصب محیط دسکتاپ سبک XFCE و ابزارهای VNC
+          sudo apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify wget curl jq
+          
+          # دانلود و نصب کلودفلرد برای تونل کردن
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: راه‌اندازی دسکتاپ و سرور WebSocket
+      - name: Setup VNC Password & Display
         run: |
-          export DISPLAY=:99
-          # رزولوشن 1080p
-          Xvfb :99 -screen 0 1920x1080x24 &
+          mkdir -p ~/.vnc
+          # تنظیم رمز عبور 123456
+          echo "123456" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
           
-          # انتظار برای آماده شدن دیسپلی
-          for i in $(seq 1 15); do
-              if xdpyinfo -display :99 >/dev/null 2>&1; then
-                  echo "✅ دیسپلی :99 بعد از $i ثانیه آماده شد"
-                  break
-              fi
-              sleep 1
-          done
+          # تنظیم فایل استارت‌آپ برای لود شدن دسکتاپ
+          echo -e "#!/bin/sh\nexport XKL_XMODMAP_DISABLE=1\nexec startxfce4" > ~/.vnc/xstartup
+          chmod +x ~/.vnc/xstartup
+
+      - name: Start VNC Server (Optimized for Low Bandwidth)
+        run: |
+          # اجرای سرور VNC با عمق رنگ 16 برای کاهش مصرف اینترنت و افزایش فریم ریت
+          vncserver :1 -geometry 1280x720 -depth 16 -localhost no
+
+      - name: Start NoVNC Web Socket
+        run: |
+          # تبدیل VNC به نسخه وب برای دسترسی از مرورگر
+          websockify --web /usr/share/novnc/ 8080 localhost:5901 &
+
+      - name: Start Cloudflare Tunnel & Print Link
+        run: |
+          # اجرای تونل کلودفلر
+          cloudflared tunnel --url http://localhost:8080 --logfile cloudflared.log &
           
-          xfce4-session &
-          sleep 3
-
-          cat > server.py << 'PYEOF'
-          import base64, subprocess, threading, time
-          from flask import Flask, render_template_string
-          from flask_socketio import SocketIO, emit
-
-          app = Flask(__name__)
-          socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins='*')
-
-          HTML_PAGE = """
-          <!DOCTYPE html>
-          <html>
-          <head><title>Remote Desktop</title>
-          <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-          <style>
-              body { margin:0; background:#000; overflow:hidden; }
-              img { width:100vw; height:auto; display:block; cursor:crosshair; }
-          </style>
-          </head>
-          <body>
-              <img id="screen" src="" alt="Desktop">
-              <script>
-                  const socket = io();
-                  const img = document.getElementById('screen');
-
-                  socket.on('frame', (data) => {
-                      img.src = 'data:image/jpeg;base64,' + data.image;
-                  });
-
-                  img.addEventListener('click', (e) => {
-                      const rect = img.getBoundingClientRect();
-                      const x = e.clientX - rect.left;
-                      const y = e.clientY - rect.top;
-                      const scaleX = 1920 / rect.width;
-                      const scaleY = 1080 / rect.height;
-                      socket.emit('click', {
-                          x: Math.round(x * scaleX),
-                          y: Math.round(y * scaleY)
-                      });
-                  });
-              </script>
-          </body>
-          </html>
-          """
-
-          @app.route('/')
-          def index():
-              return render_template_string(HTML_PAGE)
-
-          @socketio.on('click')
-          def handle_click(data):
-              x, y = data['x'], data['y']
-              subprocess.run(f"DISPLAY=:99 xdotool mousemove {x} {y} click 1", shell=True)
-
-          def frame_sender():
-              while True:
-                  # گرفتن اسکرین‌شات PNG و تبدیل به JPEG با کیفیت ۵۰٪
-                  subprocess.run("maim -d :99 /tmp/screen.png", shell=True)
-                  subprocess.run("convert /tmp/screen.png -quality 50 /tmp/screen.jpg", shell=True)
-                  with open('/tmp/screen.jpg', 'rb') as f:
-                      b64 = base64.b64encode(f.read()).decode()
-                  socketio.emit('frame', {'image': b64})
-                  time.sleep(0.1)  # ۱۰ فریم در ثانیه
-
-          threading.Thread(target=frame_sender, daemon=True).start()
-
-          if __name__ == '__main__':
-              socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
-          PYEOF
-
-          python3 server.py &
-
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-          chmod +x cloudflared
-          ./cloudflared tunnel --url http://localhost:5000 2>&1 | tee /tmp/cf-log &
+          # صبر میکنیم تا لینک ساخته بشه
           sleep 12
-          URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-log | head -n 1)
-          echo "🌐 **لینک دسکتاپ زنده (WebSocket):** $URL"
-          sleep 21600
+          
+          # استخراج لینک موقت
+          URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cloudflared.log | head -n 1)
+          
+          echo "===================================================================="
+          echo "✅ دسکتاپ شما آماده است!"
+          echo "🌐 برای اتصال، روی لینک زیر کلیک کنید:"
+          echo "👉 $URL/vnc.html?autoconnect=true&resize=scale&quality=2&compression=9"
+          echo "🔑 رمز عبور: 123456"
+          echo "📱 نکته: لینک بالا برای گوشی بهینه‌سازی شده (تنظیم سایز خودکار و کمترین لگ)"
+          echo "===================================================================="
+
+      - name: Keep Alive
+        run: |
+          # این حلقه باعث میشه گیت‌هاب اکشن تا 6 ساعت (محدودیت گیت‌هاب) روشن بمونه
+          while true; do sleep 60; done
