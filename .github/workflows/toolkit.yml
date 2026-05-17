@@ -6,16 +6,31 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 🔑 دسترسی لازم برای مدیریت ورک‌فلوها
+    permissions:
+      actions: write
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
+      # 💾 بخش بازیابی کل حافظه سیستم (فایل‌ها، دانلودها و اطلاعات فایرفاکس)
+      - name: Restore Persistent Data
+        uses: actions/cache@v3
+        with:
+          path: |
+            /home/runner/.mozilla
+            /home/runner/Desktop
+            /home/runner/Downloads
+          key: vnc-desktop-${{ github.run_id }}
+          restore-keys: |
+            vnc-desktop-
+
       - name: Install Desktop Environment & Tools
         run: |
           sudo apt-get update
           # نصب محیط دسکتاپ سبک XFCE و ابزارهای VNC
-          sudo apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify wget curl jq
+          sudo apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify wget curl jq firefox
           
           # دانلود و نصب کلودفلرد برای تونل کردن
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -31,6 +46,14 @@ jobs:
           # تنظیم فایل استارت‌آپ برای لود شدن دسکتاپ
           echo -e "#!/bin/sh\nexport XKL_XMODMAP_DISABLE=1\nexec startxfce4" > ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
+
+          # 📁 ساخت پوشه‌های دسکتاپ و دانلودها در صورت عدم وجود
+          mkdir -p /home/runner/Desktop
+          mkdir -p /home/runner/Downloads
+
+          # 🛑 ساخت اسکریپت اختصاصی برای خروج امن و ذخیره‌سازی اطلاعات
+          echo -e "#!/bin/bash\ntouch /tmp/stop_desktop\necho 'در حال ذخیره‌سازی و خروج... لطفا تب مرورگر را ببندید.'" > /home/runner/Desktop/Stop_and_Save.sh
+          chmod +x /home/runner/Desktop/Stop_and_Save.sh
 
       - name: Start VNC Server (Optimized for Low Bandwidth)
         run: |
@@ -59,9 +82,27 @@ jobs:
           echo "👉 $URL/vnc.html?autoconnect=true&resize=scale&quality=2&compression=9"
           echo "🔑 رمز عبور: 123456"
           echo "📱 نکته: لینک بالا برای گوشی بهینه‌سازی شده (تنظیم سایز خودکار و کمترین لگ)"
+          echo "💾 آموزش ذخیره‌سازی: روی دسکتاپ فایلی به نام Stop_and_Save.sh وجود دارد."
+          echo "   هر زمان کار ت تمام شد، روی آن دو بار کلیک کن و Execute را بزن تا اطلاعات مرورگر و فایل‌ها ذخیره شوند."
           echo "===================================================================="
 
-      - name: Keep Alive
+      - name: Keep Alive (Safe Timer & Auto Save)
         run: |
-          # این حلقه باعث میشه گیت‌هاب اکشن تا 6 ساعت (محدودیت گیت‌هاب) روشن بمونه
-          while true; do sleep 60; done
+          # این بخش هر دقیقه چک می‌کند که آیا کاربر دکمه خروج را زده یا زمان حداکثر (۵.۵ ساعت) به پایان رسیده است
+          for i in {1..330}; do
+            if [ -f /tmp/stop_desktop ]; then
+              echo "🔴 دستور خروج امن صادر شد. در حال بستن سیستم و آپلود حافظه روی گیت‌هاب..."
+              break
+            fi
+            sleep 60
+          done
+          echo "✅ پایان کار ورک‌فلو. اطلاعات با موفقیت ذخیره شدند."
+
+      # 🔄 بخش جدید: اجرای خودکار مجدد ورک‌فلو برای ساخت حلقه بی‌انتها
+      - name: Trigger Next Run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "🔄 در حال فرستادن دستور اجرای مجدد برای دور بعدی..."
+          gh workflow run "NoVNC Cloud Desktop" --ref ${{ github.ref_name }}
